@@ -202,7 +202,7 @@ static void iwgif_record_pixel(struct iwgifrcontext *rctx, unsigned int coloridx
 	unsigned int r,g,b,a;
 	size_t pixnum;
 	size_t xi,yi; // position in image coordinates
-	size_t xs /*,ys*/; // position in screen coordinates
+	size_t xs,ys; // position in screen coordinates
 	iw_byte *ptr;
 
 	img = rctx->img;
@@ -213,10 +213,12 @@ static void iwgif_record_pixel(struct iwgifrcontext *rctx, unsigned int coloridx
 	xi = pixnum%rctx->image_width;
 	yi = pixnum/rctx->image_width;
 	xs = rctx->image_left + xi;
-	// ys = rctx->image_top + yi;
+	ys = rctx->image_top + yi;
 
-	// Check if the x-coordinate is on the screen.
+	// Make sure the coordinate is within the image, and on the screen.
+	if(yi>=(size_t)rctx->image_height) return;
 	if(xs>=(size_t)rctx->screen_width) return;
+	if(ys>=(size_t)rctx->screen_height) return;
 
 	// Because of how we de-interlace, it's not obvious whether the Y coordinate
 	// is on the screen. The easiest way is to check if the row pointer is NULL.
@@ -322,8 +324,9 @@ static void lzw_emit_code(struct iwgifrcontext *rctx, struct lzwdeccontext *d,
 
 // Add a code to the dictionary.
 // Sets d->last_code_added to the position where it was added.
-// Returns 1 if successful, 0 if table is full.
-static int lzw_add_to_dict(struct lzwdeccontext *d, unsigned int oldcode, iw_byte val)
+// Returns 1 if successful, 2 if table is full, 0 on error.
+static int lzw_add_to_dict(struct iwgifrcontext *rctx, struct lzwdeccontext *d,
+	unsigned int oldcode, iw_byte val)
 {
 	static const unsigned int last_code_of_size[] = {
 		// The first 3 values are unused.
@@ -333,10 +336,16 @@ static int lzw_add_to_dict(struct lzwdeccontext *d, unsigned int oldcode, iw_byt
 
 	if(d->ct_used>=4096) {
 		d->last_code_added = 0;
-		return 0;
+		return 2;
 	}
 
 	newpos = d->ct_used;
+
+	if(oldcode >= newpos) {
+		iw_set_error(rctx->ctx, "GIF decoding error");
+		return 0;
+	}
+
 	d->ct_used++;
 
 	d->ct[newpos].parent = (iw_uint16)oldcode;
@@ -359,6 +368,8 @@ static int lzw_add_to_dict(struct lzwdeccontext *d, unsigned int oldcode, iw_byt
 static int lzw_process_code(struct iwgifrcontext *rctx, struct lzwdeccontext *d,
 		unsigned int code)
 {
+	int ret;
+
 	if(code==d->eoi_code) {
 		d->eoi_flag=1;
 		return 1;
@@ -385,7 +396,8 @@ static int lzw_process_code(struct iwgifrcontext *rctx, struct lzwdeccontext *d,
 
 		// Let k = the first character of the translation of the code.
 		// Add <oldcode>k to the dictionary.
-		lzw_add_to_dict(d,d->oldcode,d->ct[code].firstchar);
+		ret = lzw_add_to_dict(rctx,d,d->oldcode,d->ct[code].firstchar);
+		if(ret==0) return 0;
 	}
 	else {
 		// No, code is not in table.
@@ -396,7 +408,9 @@ static int lzw_process_code(struct iwgifrcontext *rctx, struct lzwdeccontext *d,
 
 		// Let k = the first char of the translation of oldcode.
 		// Add <oldcode>k to the dictionary.
-		if(lzw_add_to_dict(d,d->oldcode,d->ct[d->oldcode].firstchar)) {
+		ret = lzw_add_to_dict(rctx,d,d->oldcode,d->ct[d->oldcode].firstchar);
+		if(ret==0) return 0;
+		if(ret==1) {
 			// Write <oldcode>k to the output stream.
 			lzw_emit_code(rctx,d,d->last_code_added);
 		}
@@ -612,6 +626,10 @@ static int iwgif_read_image(struct iwgifrcontext *rctx)
 
 	rctx->image_width = (int)iw_get_ui16le(&rctx->rbuf[4]);
 	rctx->image_height = (int)iw_get_ui16le(&rctx->rbuf[6]);
+	if(rctx->image_width<1 || rctx->image_height<1) {
+		iw_set_error(rctx->ctx, "Invalid image dimensions");
+		goto done;
+	}
 
 	rctx->interlaced = (int)((rctx->rbuf[8]>>6)&0x01);
 
@@ -651,7 +669,7 @@ static int iwgif_read_image(struct iwgifrcontext *rctx)
 	// (And if !rctx->include_screen, to wait until we know the size of the image.)
 	if(!iwgif_init_screen(rctx)) goto done;
 
-	rctx->total_npixels = rctx->image_width * rctx->image_height;
+	rctx->total_npixels = (size_t)rctx->image_width * (size_t)rctx->image_height;
 
 	if(!iwgif_make_row_pointers(rctx)) goto done;
 
@@ -782,6 +800,9 @@ IW_IMPL(int) iw_read_gif_file(struct iw_context *ctx, struct iw_iodescr *iodescr
 done:
 	if(!retval) {
 		iw_set_error(ctx,"Failed to read GIF file");
+		// If we didn't call iw_set_input_image, 'img' still belongs to us,
+		// so free its contents.
+		iw_free(ctx, img.pixels);
 	}
 
 	if(rctx) {

@@ -371,6 +371,7 @@ static int iwbmp_read_info_header(struct iwbmprcontext *rctx)
 	// structure, and identifies the BMP version.
 	if(!iwbmp_read(rctx,buf,4)) goto done;
 	rctx->infoheader_size = iw_get_ui32le(&buf[0]);
+	if(rctx->infoheader_size<12) goto done;
 
 	// Read the rest of the header.
 	n = rctx->infoheader_size;
@@ -424,7 +425,7 @@ static int find_high_bit(unsigned int x)
 {
 	int i;
 	for(i=31;i>=0;i--) {
-		if(x&(1<<i)) return i;
+		if(x&(1U<<(unsigned int)i)) return i;
 	}
 	return 0;
 }
@@ -432,7 +433,7 @@ static int find_low_bit(unsigned int x)
 {
 	int i;
 	for(i=0;i<=31;i++) {
-		if(x&(1<<i)) return i;
+		if(x&(1U<<(unsigned int)i)) return i;
 	}
 	return 0;
 }
@@ -987,6 +988,9 @@ IW_IMPL(int) iw_read_bmp_file(struct iw_context *ctx, struct iw_iodescr *iodescr
 done:
 	if(!retval) {
 		iw_set_error(ctx,"BMP read failed");
+		// If we didn't call iw_set_input_image, 'img' still belongs to us,
+		// so free its contents.
+		iw_free(ctx, img.pixels);
 	}
 	return retval;
 }
